@@ -1,452 +1,407 @@
 # quizgui.py
-
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import os, base64, json, random, re, time
+from tkinter import ttk, messagebox
+import time
+import os
+import base64
+import json
+from datetime import datetime
 from PIL import Image, ImageTk
-from results import ResultsWindow  # Importing the ResultsWindow class
-from utils import format_hms, combine_text_for_display, clean_answer_text  # Import from utils.py
+import io
+from results import ResultsWindow
+from utils import format_hms, clean_answer_text
 
 class QuizGUI(tk.Toplevel):
     def __init__(self, parent, exam_data, json_filename=None, exam_name=None, results_folder=None):
         super().__init__(parent)
-        self.parent = parent  # Reference to the main Tk window
+        self.parent = parent
         self.exam_data = exam_data
-        self.json_filename = json_filename
-
-        # Determine exam name
-        if exam_name:
-            self.exam_name = exam_name
-        elif json_filename:
-            self.exam_name = os.path.splitext(os.path.basename(json_filename))[0]
-        else:
-            self.exam_name = "Untitled"
-
-        # Set the results_folder
-        self.results_folder = results_folder or "./results"
-
         self.questions = exam_data.get("questions", [])
         self.num_questions = len(self.questions)
+        self.json_filename = json_filename
+        self.exam_name = exam_name or "Untitled Exam"
+        self.results_folder = results_folder or "./results"
 
-        self.title(f"Quiz - {self.exam_name}")
-        self.geometry("1000x700")  # Increased size for better layout
-        self.minsize(800, 600)      # Minimum size for responsiveness
+        self.title(f"Exam - {self.exam_name}")
+        self.geometry("950x650")
+        self.minsize(800, 600)
 
-        # User picks
+        # User answers and state management
         self.user_answers = [set() for _ in range(self.num_questions)]
-        self.current_index = 0
+        self.current_question_index = 0
+        self.question_image_refs = []
+        self.answer_image_refs = []
+        self.check_vars = []
+        self.checkboxes = []
 
-        # Timer
+        # Timer and pause management
         self.start_time = time.time()
+        self.timer_running = True
         self.paused = False
         self.pause_start = None
         self.accumulated_pause = 0.0
 
-        # For the navigator
+        # Navigation buttons
         self.nav_buttons = []
 
-        # For images
-        self.question_imgs = []
-        self.answer_imgs = []
-
-        # Initialize check_vars and checkboxes to avoid AttributeError
-        self.check_vars = []
-        self.checkboxes = []
-
         self.build_ui()
+        self.show_question(0)
 
-        # If no questions, close
-        if self.num_questions > 0:
-            self.show_question(0)
-        else:
-            messagebox.showinfo("No Questions", "No questions after selection.")
-            self.destroy()
-            return
-
-        # Bind mousewheel
+        # Input bindings
         self.bind("<MouseWheel>", self.global_on_mousewheel, add=True)
-        # Bind additional mousewheel events for Linux compatibility
-        self.bind("<Button-4>", lambda event: self.on_mousewheel(event, delta=1))
-        self.bind("<Button-5>", lambda event: self.on_mousewheel(event, delta=-1))
+        self.bind("<Button-4>", lambda e: self.on_mousewheel(e, delta=1))
+        self.bind("<Button-5>", lambda e: self.on_mousewheel(e, delta=-1))
         self.update_timer()
 
     def build_ui(self):
-        # Configure grid weights for responsiveness
-        self.grid_rowconfigure(0, weight=0)  # Top bar
-        self.grid_rowconfigure(1, weight=1)  # Main content
-        self.grid_rowconfigure(2, weight=0)  # Bottom bar
-        self.grid_columnconfigure(0, weight=0)  # Navigator
-        self.grid_columnconfigure(1, weight=1)  # Main area
+        # ---------- LEFT: Navigator ----------
+        self.nav_frame = tk.Frame(self, bd=2, relief="sunken")
+        self.nav_frame.pack(side="left", fill="y", padx=5, pady=5)
 
-        # Top bar with timer and pause button
-        top_bar = tk.Frame(self)
-        top_bar.grid(row=0, column=0, columnspan=2, sticky="ew")
-        top_bar.grid_columnconfigure(0, weight=1)
-        top_bar.grid_columnconfigure(1, weight=0)
+        label_nav = tk.Label(self.nav_frame, text="Question Navigator:", font=("Segoe UI", 12, "bold"))
+        label_nav.pack(pady=5)
 
-        self.pause_btn = tk.Button(top_bar, text="Pause", command=self.toggle_pause)
-        self.pause_btn.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        nav_scroll = tk.Scrollbar(self.nav_frame, orient="vertical")
+        nav_scroll.pack(side="right", fill="y")
 
-        self.timer_label = tk.Label(top_bar, text="Time: 00:00:00", font=("Segoe UI", 12, "bold"))
-        self.timer_label.grid(row=0, column=1, padx=10, pady=5, sticky="e")
-
-        # Left navigator
-        nav_frame = tk.Frame(self, bd=2, relief="sunken")
-        nav_frame.grid(row=1, column=0, sticky="ns", padx=5, pady=5)
-        nav_frame.grid_rowconfigure(1, weight=1)
-        nav_frame.grid_columnconfigure(0, weight=1)
-
-        lbl_nav = tk.Label(nav_frame, text="Navigator:", font=("Segoe UI", 12, "bold"))
-        lbl_nav.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-
-        nav_scroll = tk.Scrollbar(nav_frame, orient="vertical")
-        nav_scroll.grid(row=1, column=1, sticky="ns")
-
-        self.nav_canvas = tk.Canvas(nav_frame, yscrollcommand=nav_scroll.set, width=120)
-        self.nav_canvas.grid(row=1, column=0, sticky="nsew")
-
+        self.nav_canvas = tk.Canvas(self.nav_frame, yscrollcommand=nav_scroll.set, width=120)
+        self.nav_canvas.pack(side="left", fill="both", expand=True)
         nav_scroll.config(command=self.nav_canvas.yview)
 
         self.nav_inner = tk.Frame(self.nav_canvas)
-        self.nav_window = self.nav_canvas.create_window((0, 0), window=self.nav_inner, anchor="nw")
+        self.nav_window_item = self.nav_canvas.create_window((0,0), window=self.nav_inner, anchor="nw")
+
         self.nav_inner.bind("<Configure>",
-                            lambda e: self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox(self.nav_window)))
+                          lambda e: self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox(self.nav_window_item)))
 
         for i in range(self.num_questions):
-            b = tk.Button(self.nav_inner, text=f"Q{i + 1}", width=5,
-                          command=lambda ix=i: self.show_question(ix))
+            btn_text = f"Q{i+1}"
+            b = tk.Button(self.nav_inner, text=btn_text, font=("Segoe UI", 11),
+                        width=6, command=lambda ix=i: self.show_question(ix))
             b.pack(padx=5, pady=2, fill="x")
             self.nav_buttons.append(b)
 
-        # Main quiz area
+        # ---------- RIGHT: Main area ----------
         self.main_area = tk.Frame(self)
-        self.main_area.grid(row=1, column=1, sticky="nsew", padx=10, pady=5)
-        self.main_area.grid_rowconfigure(0, weight=1)
-        self.main_area.grid_columnconfigure(0, weight=1)
+        self.main_area.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
-        # Question display with rich text support using Text widget
-        self.question_frame = tk.Text(self.main_area, wrap="word", font=("Segoe UI", 11), state="disabled",
-                                      bg=self.main_area.cget("bg"), relief="flat")
-        self.question_frame.grid(row=0, column=0, sticky="nsew")
+        # Main container with grid layout
+        main_container = tk.Frame(self.main_area)
+        main_container.pack(fill="both", expand=True)
+        main_container.grid_rowconfigure(0, weight=0)  # Top bar
+        main_container.grid_rowconfigure(1, weight=1)  # Question area
+        main_container.grid_rowconfigure(2, weight=0)  # Navigation buttons
+        main_container.grid_columnconfigure(0, weight=1)
 
-        # Scrollable answers area
-        self.answers_canvas = tk.Canvas(self.main_area)
-        self.answers_canvas.grid(row=1, column=0, sticky="nsew")
+        # Top bar with timer and pause button
+        top_bar = tk.Frame(main_container)
+        top_bar.grid(row=0, column=0, sticky="ew", pady=5)
+        
+        self.pause_btn = tk.Button(top_bar, text="Pause", command=self.toggle_pause)
+        self.pause_btn.pack(side="left", padx=5)
+        
+        self.timer_label = tk.Label(top_bar, text="Time: 00:00:00", font=("Segoe UI", 12, "bold"))
+        self.timer_label.pack(side="right", padx=5)
 
-        self.answers_scroll = tk.Scrollbar(self.main_area, orient="vertical", command=self.answers_canvas.yview)
-        self.answers_scroll.grid(row=1, column=1, sticky="ns")
-        self.answers_canvas.configure(yscrollcommand=self.answers_scroll.set)
+        # Question display area
+        q_frame = tk.Frame(main_container)
+        q_frame.grid(row=1, column=0, sticky="nsew", pady=5)
 
-        self.answers_inner = tk.Frame(self.answers_canvas)
-        self.answers_canvas.create_window((0, 0), window=self.answers_inner, anchor="nw")
-        self.answers_inner.bind("<Configure>",
-                                lambda e: self.answers_canvas.configure(scrollregion=self.answers_canvas.bbox("all")))
+        self.q_scroll = tk.Scrollbar(q_frame)
+        self.q_scroll.pack(side="right", fill="y")
+
+        self.q_canvas = tk.Canvas(q_frame, yscrollcommand=self.q_scroll.set)
+        self.q_canvas.pack(side="left", fill="both", expand=True)
+        self.q_scroll.config(command=self.q_canvas.yview)
+
+        self.q_container = tk.Frame(self.q_canvas)
+        self.q_window_item = self.q_canvas.create_window((0, 0), window=self.q_container, anchor="nw")
+
+        # Dynamic width adjustment
+        def configure_canvas(event):
+            canvas_width = event.width
+            scrollbar_width = self.q_scroll.winfo_width()
+            content_width = canvas_width - scrollbar_width - 20
+            self.q_canvas.itemconfig(self.q_window_item, width=content_width)
+            
+            # Update wraplength for all labels
+            for child in self.q_container.winfo_children():
+                if isinstance(child, tk.Label) and "wraplength" in child.config():
+                    child.config(wraplength=content_width - 40)
+
+        self.q_canvas.bind('<Configure>', configure_canvas)
 
         # Bottom navigation buttons
-        bottom = tk.Frame(self)
-        bottom.grid(row=2, column=0, columnspan=2, pady=10, sticky="ew")
-        bottom.grid_columnconfigure(0, weight=1)
-        bottom.grid_columnconfigure(1, weight=1)
-        bottom.grid_columnconfigure(2, weight=1)
+        nav_btns_frame = tk.Frame(main_container)
+        nav_btns_frame.grid(row=2, column=0, sticky="ew", pady=10)
 
-        self.prev_btn = tk.Button(bottom, text="Previous", command=self.prev_question)
-        self.prev_btn.grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        # Configure grid weights for button alignment
+        nav_btns_frame.grid_columnconfigure(0, weight=1)
+        nav_btns_frame.grid_columnconfigure(1, weight=0)
+        nav_btns_frame.grid_columnconfigure(2, weight=1)
 
-        finish_btn = tk.Button(bottom, text="Finish Exam", command=self.finish_exam)
-        finish_btn.grid(row=0, column=2, padx=5, pady=5, sticky="e")  # Positioned at bottom right
+        # Left-aligned buttons container
+        left_btn_frame = tk.Frame(nav_btns_frame)
+        left_btn_frame.grid(row=0, column=0, sticky="w")
 
-        self.next_btn = tk.Button(bottom, text="Next", command=self.next_question)
-        self.next_btn.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.prev_btn = tk.Button(left_btn_frame, text="Previous", 
+                                font=("Segoe UI", 11), command=self.prev_question)
+        self.prev_btn.pack(side="left", padx=5)
 
-    def on_mousewheel(self, event, delta=0):
-        """Handle mouse wheel events for Linux."""
-        if delta:
-            self.answers_canvas.yview_scroll(delta, "units")
+        self.next_btn = tk.Button(left_btn_frame, text="Next", 
+                                font=("Segoe UI", 11), command=self.next_question)
+        self.next_btn.pack(side="left", padx=5)
+
+        # Right-aligned finish button
+        tk.Button(nav_btns_frame, text="Finish Exam", 
+                font=("Segoe UI", 12, "bold"), command=self.finish_exam
+                ).grid(row=0, column=2, sticky="e", padx=5)
+
+        # Configure container resize
+        self.q_container.bind("<Configure>", 
+                            lambda e: self.q_canvas.configure(
+                                scrollregion=self.q_canvas.bbox("all")))
+
+    def show_question(self, index):
+        self.store_current_picks()
+        self.current_question_index = index
+        
+        # Clear previous content
+        for widget in self.q_container.winfo_children():
+            widget.destroy()
+            
+        self.question_image_refs.clear()
+        self.answer_image_refs.clear()
+        self.check_vars = []
+        self.checkboxes = []
+
+        # Get current question data
+        qobj = self.questions[index]
+        question_number = qobj.get("question_number", index+1)
+        
+        # Header
+        header = tk.Label(self.q_container, 
+                        text=f"Question {index+1}/{self.num_questions}: #{question_number}",
+                        font=("Segoe UI", 14, "bold"), anchor="w")
+        header.pack(anchor="w", pady=(0, 15))
+
+        # Question content
+        for part in qobj.get("question_parts", []):
+            ptype, content = part[0], part[1]
+            if ptype == "text":
+                lbl = tk.Label(self.q_container, text=content, 
+                             wraplength=700, justify="left",
+                             font=("Segoe UI", 11))
+                lbl.pack(anchor="w", pady=2)
+            elif ptype == "image_base64":
+                try:
+                    image_data = base64.b64decode(content)
+                    image = Image.open(io.BytesIO(image_data))
+                    image.thumbnail((600, 400))
+                    photo = ImageTk.PhotoImage(image)
+                    self.question_image_refs.append(photo)
+                    lbl = tk.Label(self.q_container, image=photo)
+                    lbl.pack(anchor="w", pady=5)
+                except Exception as e:
+                    err = tk.Label(self.q_container, text="[Error loading image]", fg="red")
+                    err.pack(anchor="w")
+
+        # Answers
+        answers_frame = tk.Frame(self.q_container)
+        answers_frame.pack(anchor="w", fill="x", pady=10)
+        
+        correct_answers = qobj.get("correct_answers", [])
+        max_picks = len(correct_answers) if correct_answers else 1
+        
+        for ans_idx, answer_parts in enumerate(qobj.get("answers", [])):
+            answer_frame = tk.Frame(answers_frame)
+            answer_frame.pack(anchor="w", fill="x", pady=3)
+            
+            # Checkbox
+            var = tk.BooleanVar(value=chr(65+ans_idx) in self.user_answers[index])
+            cb = tk.Checkbutton(answer_frame, text=f"{chr(65+ans_idx)}.", 
+                              font=("Segoe UI", 11), variable=var,
+                              command=lambda i=ans_idx: self.on_answer_toggle(i))
+            cb.grid(row=0, column=0, sticky="w")
+            self.check_vars.append(var)
+            self.checkboxes.append(cb)
+
+            # Answer content
+            col = 1
+            row = 0
+            for part in answer_parts:
+                ptype, content = part[0], part[1]
+                if ptype == "text":
+                    cleaned_text = clean_answer_text(content)
+                    lbl = tk.Label(answer_frame, text=cleaned_text, 
+                                 wraplength=600, justify="left",
+                                 font=("Segoe UI", 11))
+                    lbl.grid(row=row, column=col, sticky="w", padx=5)
+                elif ptype == "image_base64":
+                    try:
+                        image_data = base64.b64decode(content)
+                        image = Image.open(io.BytesIO(image_data))
+                        image.thumbnail((400, 300))
+                        photo = ImageTk.PhotoImage(image)
+                        self.answer_image_refs.append(photo)
+                        lbl = tk.Label(answer_frame, image=photo)
+                        row += 1
+                        lbl.grid(row=row, column=col, sticky="w", padx=25, pady=5)
+                    except Exception as e:
+                        err = tk.Label(answer_frame, text="[Error loading image]", fg="red")
+                        row += 1
+                        err.grid(row=row, column=col, sticky="w", padx=25)
+
+        self.enforce_checkbox_limit(max_picks)
+        self.update_navigation()
+        self.q_canvas.yview_moveto(0.0)
+
+    def on_answer_toggle(self, ans_idx):
+        self.store_current_picks()
+        qobj = self.questions[self.current_question_index]
+        correct_answers = qobj.get("correct_answers", [])
+        max_picks = len(correct_answers) if correct_answers else 1
+        self.enforce_checkbox_limit(max_picks)
+        self.update_navigation()
+
+    def enforce_checkbox_limit(self, max_picks):
+        current_picks = sum(var.get() for var in self.check_vars)
+        for i, var in enumerate(self.check_vars):
+            if current_picks >= max_picks and not var.get():
+                self.checkboxes[i].config(state="disabled")
+            else:
+                self.checkboxes[i].config(state="normal")
+
+    def store_current_picks(self):
+        index = self.current_question_index
+        self.user_answers[index] = set()
+        for i, var in enumerate(self.check_vars):
+            if var.get():
+                self.user_answers[index].add(chr(65+i))
+
+    def update_navigation(self):
+        index = self.current_question_index
+        btn = self.nav_buttons[index]
+        btn_text = f"Q{index+1}"
+        if self.user_answers[index]:
+            btn_text += " ✓"
+        btn.config(text=btn_text)
+        
+        self.prev_btn.config(state="normal" if index > 0 else "disabled")
+        self.next_btn.config(state="normal" if index < self.num_questions-1 else "disabled")
+
+    def toggle_pause(self):
+        if not self.paused:
+            self.paused = True
+            self.pause_start = time.time()
+            self.pause_btn.config(text="Resume")
+            self.timer_running = False
+            
+            # Disable interactions
+            for widget in [self.prev_btn, self.next_btn] + self.nav_buttons + self.checkboxes:
+                widget.config(state="disabled")
         else:
-            self.answers_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self.paused = False
+            self.accumulated_pause += time.time() - self.pause_start
+            self.pause_btn.config(text="Pause")
+            self.timer_running = True
+            
+            # Enable interactions
+            for widget in [self.prev_btn, self.next_btn] + self.nav_buttons:
+                widget.config(state="normal")
+            qobj = self.questions[self.current_question_index]
+            correct_answers = qobj.get("correct_answers", [])
+            self.enforce_checkbox_limit(len(correct_answers) if correct_answers else 1)
+            
+        self.update_timer()
+
+    def update_timer(self):
+        if self.timer_running and not self.paused:
+            elapsed = time.time() - self.start_time - self.accumulated_pause
+            self.timer_label.config(text=f"Time: {format_hms(elapsed)}")
+        self.after(500, self.update_timer)
+
+    def prev_question(self):
+        if self.current_question_index > 0:
+            self.show_question(self.current_question_index - 1)
+
+    def next_question(self):
+        if self.current_question_index < self.num_questions - 1:
+            self.show_question(self.current_question_index + 1)
+
+    def finish_exam(self):
+        self.timer_running = False
+        total_time = time.time() - self.start_time - self.accumulated_pause
+        
+        # Calculate score
+        total_points = 0.0
+        for i, q in enumerate(self.questions):
+            correct = set(q.get("correct_answers", []))
+            user = self.user_answers[i]
+            if correct:
+                total_points += len(user & correct) / len(correct)
+        
+        percentage = (total_points / self.num_questions) * 100 if self.num_questions else 0
+        
+        # Prepare results data
+        results_data = {
+            "exam_name": self.exam_name,
+            "final_score": total_points,
+            "total_questions": self.num_questions,
+            "percentage": percentage,
+            "elapsed_time": format_hms(total_time),
+            "user_answers": [sorted(ans) for ans in self.user_answers],
+            "questions": self.questions
+        }
+        
+        # Save results
+        os.makedirs(self.results_folder, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{self.exam_name}_results_{timestamp}.json"
+        with open(os.path.join(self.results_folder, filename), "w") as f:
+            json.dump(results_data, f, indent=2)
+            
+        # Show results window
+        ResultsWindow(self.parent, results_data)
+        self.destroy()
 
     def global_on_mousewheel(self, event):
-        """Handle mouse wheel events for other platforms."""
         px, py = self.winfo_pointerxy()
-        if self.point_in_widget(px, py, self.nav_canvas):
-            self.nav_canvas.yview_scroll(int(-event.delta / 120), "units")
-        elif self.point_in_widget(px, py, self.answers_canvas):
-            self.answers_canvas.yview_scroll(int(-event.delta / 120), "units")
+        if self.point_in_widget(px, py, self.nav_frame):
+            if self.can_scroll_nav():
+                self.nav_canvas.yview_scroll(int(-event.delta/120), "units")
+        elif self.point_in_widget(px, py, self.main_area):
+            if self.can_scroll_question():
+                self.q_canvas.yview_scroll(int(-event.delta/120), "units")
+
+    def on_mousewheel(self, event, delta):
+        px, py = self.winfo_pointerxy()
+        if self.point_in_widget(px, py, self.nav_frame):
+            if self.can_scroll_nav():
+                self.nav_canvas.yview_scroll(-delta, "units")
+        elif self.point_in_widget(px, py, self.main_area):
+            if self.can_scroll_question():
+                self.q_canvas.yview_scroll(-delta, "units")
 
     def point_in_widget(self, px, py, widget):
-        """Check if the pointer is within a given widget."""
         x1 = widget.winfo_rootx()
         y1 = widget.winfo_rooty()
         x2 = x1 + widget.winfo_width()
         y2 = y1 + widget.winfo_height()
         return (px >= x1 and px < x2 and py >= y1 and py < y2)
 
-    def toggle_pause(self):
-        """Toggle the pause state of the quiz."""
-        if not self.paused:
-            # Start pause
-            self.paused = True
-            self.pause_start = time.time()
-            self.pause_btn.config(text="Resume")
-            # Disable navigation and answer selection
-            self.prev_btn.config(state="disabled")
-            self.next_btn.config(state="disabled")
-            for btn in self.nav_buttons:
-                btn.config(state="disabled")
-            for cb in self.checkboxes:
-                cb.config(state="disabled")
-        else:
-            # End pause
-            self.paused = False
-            paused_duration = time.time() - self.pause_start
-            self.pause_start = None
-            self.accumulated_pause += paused_duration
-            self.pause_btn.config(text="Pause")
-            # Re-enable navigation and answer selection
-            self.prev_btn.config(state="normal")
-            self.next_btn.config(state="normal")
-            for btn in self.nav_buttons:
-                btn.config(state="normal")
-            self.enforce_checkbox_limit()
+    def can_scroll_nav(self):
+        bbox = self.nav_canvas.bbox(self.nav_window_item)
+        if not bbox:
+            return False
+        content_h = bbox[3]-bbox[1]
+        visible_h = self.nav_canvas.winfo_height()
+        return content_h > visible_h
 
-    def update_timer(self):
-        """Update the timer label every 500 milliseconds."""
-        if not self.paused:
-            elapsed = time.time() - self.start_time - self.accumulated_pause
-            self.timer_label.config(text="Time: " + format_hms(elapsed))
-        self.after(500, self.update_timer)
-
-    def show_question(self, index):
-        """Display a specific question based on the index."""
-        self.store_current_picks()
-        self.current_index = index
-
-        # Clear previous question
-        self.question_frame.config(state="normal")
-        self.question_frame.delete("1.0", "end")
-        self.question_frame.config(state="disabled")
-
-        for w in self.answers_inner.winfo_children():
-            w.destroy()
-        self.answer_imgs.clear()
-
-        # Reset check_vars and checkboxes
-        self.check_vars = []
-        self.checkboxes = []
-
-        qobj = self.questions[index]
-        qnum = qobj.get("question_number", "?")
-        # Header label with rich text
-        header = f"Question {index + 1}/{self.num_questions}: #{qnum}\n\n"
-        self.question_frame.config(state="normal")
-        self.question_frame.insert("1.0", header, "header")
-        self.question_frame.tag_configure("header", font=("Segoe UI", 12, "bold"))
-
-        # Question parts with rich text
-        for (ptype, content) in qobj.get("question_parts", []):
-            if ptype == "text":
-                self.question_frame.insert("end", content + "\n", "text")
-            elif ptype == "image_base64":
-                # Decode base64 and insert image
-                try:
-                    import io
-                    bdata = base64.b64decode(content)
-                    im = Image.open(io.BytesIO(bdata))
-                    im.thumbnail((600, 400))  # Resize for better fit
-                    tkimg = ImageTk.PhotoImage(im)
-                    self.question_imgs.append(tkimg)  # Prevent garbage collection
-                    self.question_frame.image_create("end", image=tkimg)
-                    self.question_frame.insert("end", "\n")
-                except Exception as e:
-                    print(f"Error loading image in question: {e}")
-                    self.question_frame.insert("end", "[Error loading image]\n", "error")
-        self.question_frame.config(state="disabled")
-
-        # Answers with checkboxes and rich text
-        correct_list = qobj.get("correct_answers", [])
-        max_picks = len(correct_list) if correct_list else 1
-
-        picks = self.user_answers[index]
-        ans = qobj.get("answers", [])
-        for ans_i, ans_parts in enumerate(ans):
-            letter = chr(ord("A") + ans_i)
-            var = tk.BooleanVar(value=(letter in picks))
-            self.check_vars.append(var)
-
-            ans_frame = tk.Frame(self.answers_inner)
-            ans_frame.pack(anchor="w", fill="x", pady=5)
-
-            # Assign labels based on index instead of the text content
-            cbtn = tk.Checkbutton(ans_frame, text=f"{letter}.", font=("Segoe UI", 11),
-                                  variable=var, command=lambda i=ans_i: self.on_toggle_answer(i))
-            cbtn.grid(row=0, column=0, sticky="nw")
-
-            self.checkboxes.append(cbtn)
-
-            # Answer text
-            answer_text = ""
-            for (apt, val) in ans_parts:
-                if apt == "text":
-                    answer_text += val + " "
-            answer_text = answer_text.strip()
-
-            # Remove any leading labels from answer_text to prevent duplication
-            # Example: "A. Take EBS snapshots..." -> "Take EBS snapshots..."
-            answer_text = clean_answer_text(answer_text)
-
-            lb = tk.Label(ans_frame, text=answer_text, wraplength=700,
-                         justify="left", font=("Segoe UI", 11))
-            lb.grid(row=0, column=1, sticky="w", padx=5)
-
-            # Handle images in answers (lazy loading)
-            for (apt, val) in ans_parts:
-                if apt == "image_base64":
-                    try:
-                        import io
-                        bdat = base64.b64decode(val)
-                        im2 = Image.open(io.BytesIO(bdat))
-                        im2.thumbnail((400, 300))  # Resize for better fit
-                        tkim2 = ImageTk.PhotoImage(im2)
-                        self.answer_imgs.append(tkim2)  # Prevent garbage collection
-                        ilb = tk.Label(ans_frame, image=tkim2)
-                        ilb.grid(row=1, column=1, sticky="w", padx=25, pady=5)
-                    except Exception as e:
-                        print(f"Error loading image in answer: {e}")
-                        elb = tk.Label(ans_frame, text="[Error loading image]", fg="red")
-                        elb.grid(row=1, column=1, sticky="w", padx=25, pady=5)
-
-        self.enforce_checkbox_limit(max_picks)
-        self.update_nav_buttons()
-        self.update_nav_button_text(index)
-
-    def on_toggle_answer(self, ans_i):
-        """Handle toggling of answer checkboxes."""
-        self.store_current_picks()
-        qobj = self.questions[self.current_index]
-        cset = qobj.get("correct_answers", [])
-        max_picks = len(cset) if cset else 1
-        self.enforce_checkbox_limit(max_picks)
-        self.update_nav_button_text(self.current_index)
-
-    def store_current_picks(self):
-        """Store the user's current picks for the active question."""
-        if self.current_index < 0 or self.current_index >= self.num_questions:
-            return
-        picks = set()
-        for i, var in enumerate(self.check_vars):
-            if var.get():
-                letter = chr(ord("A") + i)
-                picks.add(letter)
-        self.user_answers[self.current_index] = picks
-
-    def enforce_checkbox_limit(self, max_picks):
-        """Disable checkboxes if the maximum number of picks is reached."""
-        picks = self.user_answers[self.current_index]
-        if len(picks) >= max_picks:
-            for i, var in enumerate(self.check_vars):
-                if not var.get():
-                    self.checkboxes[i].config(state="disabled")
-        else:
-            for i, var in enumerate(self.check_vars):
-                self.checkboxes[i].config(state="normal")
-
-    def update_nav_buttons(self):
-        """Enable or disable navigation buttons based on the current question."""
-        if self.current_index <= 0:
-            self.prev_btn.config(state="disabled")
-        else:
-            self.prev_btn.config(state="normal")
-        if self.current_index >= self.num_questions - 1:
-            self.next_btn.config(state="disabled")
-        else:
-            self.next_btn.config(state="normal")
-
-    def update_nav_button_text(self, ix):
-        """Update navigator button text with a checkmark if answered."""
-        picks = self.user_answers[ix]
-        btn = self.nav_buttons[ix]
-        base = f"Q{ix + 1}"
-        if picks:
-            btn.config(text=base + " \u2713")  # Checkmark
-        else:
-            btn.config(text=base)
-
-    def prev_question(self):
-        """Navigate to the previous question."""
-        if self.current_index > 0:
-            self.show_question(self.current_index - 1)
-
-    def next_question(self):
-        """Navigate to the next question."""
-        if self.current_index < self.num_questions - 1:
-            self.show_question(self.current_index + 1)
-
-    def finish_exam(self):
-        """Finalize the exam, calculate scores, save results, and display the ResultsWindow."""
-        # Debugging: Confirm finish_exam is called
-        print("QuizGUI: finish_exam called.")
-        # Removed messagebox.showinfo to prevent UI blocking
-
-        # Finalize
-        self.store_current_picks()
-        end_time = time.time()
-        total_elapsed = end_time - self.start_time
-        if self.paused and self.pause_start:
-            total_elapsed -= (time.time() - self.pause_start)
-
-        # Partial credit calculation
-        total_points = 0.0
-        for i, qobj in enumerate(self.questions):
-            cset = set(qobj.get("correct_answers", []))
-            picks = self.user_answers[i]
-            if cset:
-                partial = len(cset.intersection(picks)) / len(cset)
-            else:
-                partial = 0.0
-            total_points += partial
-
-        final_score = total_points
-        total_q = len(self.questions)
-        perc = (final_score / total_q) * 100 if total_q else 0
-
-        # Debugging: Confirm score calculation
-        print(f"QuizGUI: Final Score: {final_score} / {total_q} ({perc}%)")
-
-        # Prepare results data
-        results_data = {
-            "exam_name": self.exam_name,
-            "final_score": final_score,
-            "total_questions": total_q,
-            "percentage": perc,
-            "elapsed_time": format_hms(total_elapsed),
-            "user_answers": [list(ans) for ans in self.user_answers],  # Convert sets to lists
-            "questions": self.questions
-        }
-
-        # Save results to the 'results' folder with a timestamped filename
-        timestamp = int(time.time())
-        results_filename = f"{self.exam_name}_results_{timestamp}.json"
-        results_path = os.path.join(self.results_folder, results_filename)
-        try:
-            with open(results_path, "w", encoding="utf-8") as f:
-                json.dump(results_data, f, indent=2)
-            print(f"Results saved to {results_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to save results.\n{e}")
-            print(f"QuizGUI: Exception occurred while saving results: {e}")
-
-        # Show summary using ResultsWindow
-        try:
-            results_window = ResultsWindow(
-                self.parent,  # Pass the main Tk window as the parent
-                results_data
-            )
-            results_window.grab_set()  # Make the results window modal
-            print("QuizGUI: ResultsWindow created successfully.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to create ResultsWindow.\n{e}")
-            print(f"QuizGUI: Exception occurred while creating ResultsWindow: {e}")
-
-        # Destroy QuizGUI after ResultsWindow is created
-        self.destroy()
-
+    def can_scroll_question(self):
+        bbox = self.q_canvas.bbox("all")
+        if not bbox:
+            return False
+        content_h = bbox[3]-bbox[1]
+        visible_h = self.q_canvas.winfo_height()
+        return content_h > visible_h
