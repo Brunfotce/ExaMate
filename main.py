@@ -8,6 +8,7 @@ from editor import EditorWindow
 from quizgui import QuizGUI
 from results import ResultsWindow  # Ensure you have this class implemented
 from utils import clean_answer_text, clean_string  # Import necessary helper functions
+from Robber_GUI import RobberGUI
 
 """
 Main menu for ExaMate:
@@ -21,11 +22,12 @@ class MainMenu:
     def __init__(self, master):
         self.master = master
         self.master.title("ExaMate - Main Menu")
-        self.master.geometry("600x400")  # Increased height to accommodate new buttons
+        self.master.geometry("600x450")  # Increased height to accommodate new buttons
 
         # Ensure 'exams' and 'results' folders exist
         self.exams_folder = "./exams"
         self.results_folder = "./results"
+        self.robber_window = None  # To keep track of the RobberGUI window
         os.makedirs(self.exams_folder, exist_ok=True)
         os.makedirs(self.results_folder, exist_ok=True)
 
@@ -68,6 +70,25 @@ class MainMenu:
         # Button to load a results file
         load_results_btn = tk.Button(frame_buttons, text="Load Results File", font=("Segoe UI", 12), width=20, command=self.load_results)
         load_results_btn.grid(row=1, column=1, padx=10, pady=5)
+
+        # Button to open the Robber GUI
+        robber_btn = tk.Button(frame_buttons, text="Exam Topics Scraper", font=("Segoe UI", 12, "italic"), width=25, command=self.open_robber_gui)
+        robber_btn.grid(row=2, column=0, columnspan=2, padx=10, pady=15)
+
+    def open_robber_gui(self):
+        """Open or close the Robber GUI for scraping exam topics."""
+        # If the window instance exists and its Toplevel widget is open, close it.
+        if self.robber_window and self.robber_window.top.winfo_exists():
+            self.robber_window.top.destroy()
+            self.robber_window = None
+        # Otherwise, create and open the window.
+        else:
+            self.robber_window = RobberGUI(self.master)
+            self.robber_window.top.grab_set()
+            # The wait_window call is blocking, so we don't need to do anything after.
+            # Once the window is closed (either by the user or by toggle), wait_window will complete.
+            self.master.wait_window(self.robber_window.top)
+            self.robber_window = None # Ensure state is reset after window is closed
 
     def refresh_exams(self):
         """Refresh the exams list from the exams folder."""
