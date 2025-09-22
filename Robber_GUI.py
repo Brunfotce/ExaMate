@@ -1,217 +1,156 @@
-# main.py
-
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import os, json, random, re, time, base64
-from parse_html import parse_html_to_json
-from editor import EditorWindow
-from quizgui import QuizGUI
-from results import ResultsWindow  # Ensure you have this class implemented
-from utils import clean_answer_text, clean_string  # Import necessary helper functions
-from Robber_GUI import RobberGUI
+from tkinter import ttk, scrolledtext
+import threading
+from queue import Queue
+from Robber_logic import RobberLogic
 
-"""
-Main menu for ExaMate:
-1) Parse from HTML to JSON (with base64 images)
-2) Create a new exam from scratch (Editor)
-3) Load a .json exam and start the quiz
-4) Load a results file
-"""
-
-class MainMenu:
+class RobberGUI:
     def __init__(self, master):
-        self.master = master
-        self.master.title("ExaMate - Main Menu")
-        self.master.geometry("600x450")  # Increased height to accommodate new buttons
+        self.top = tk.Toplevel(master)
+        self.top.title("Robber - Exam Topics Scraper")
+        self.top.geometry("800x600")
 
-        # Ensure 'exams' and 'results' folders exist
-        self.exams_folder = "./exams"
-        self.results_folder = "./results"
-        self.robber_window = None  # To keep track of the RobberGUI window
-        os.makedirs(self.exams_folder, exist_ok=True)
-        os.makedirs(self.results_folder, exist_ok=True)
+        self.robber_logic = RobberLogic()
+        self.message_queue = Queue()
+        self.worker_thread = None
 
-        # Title
-        tk.Label(self.master, text="ExaMate Offline Quiz", font=("Segoe UI", 18, "bold")).pack(pady=10)
+        self.create_widgets()
+        self.top.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.process_queue()
 
-        # Frame for exam selection
-        frame_top = tk.Frame(self.master)
-        frame_top.pack(pady=5)
+    def create_widgets(self):
+        # --- Main Frame ---
+        main_frame = ttk.Frame(self.top, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(frame_top, text="Pick an Exam: ", font=("Segoe UI", 12)).grid(row=0, column=0, sticky="w", padx=5)
-        self.exam_var = tk.StringVar(value="")
-        self.combo_exams = ttk.Combobox(frame_top, textvariable=self.exam_var, state="readonly", width=40, font=("Segoe UI", 12))
-        self.combo_exams.grid(row=0, column=1, sticky="w", padx=5)
+        # --- Controls Frame ---
+        controls_frame = ttk.LabelFrame(main_frame, text="Controls", padding="10")
+        controls_frame.pack(fill=tk.X, pady=5)
+        controls_frame.columnconfigure(1, weight=1)
 
-        # Gather all .json files from './exams' folder
-        self.exams_list = []
-        self.refresh_exams()
+        # --- Mode Selection ---
+        self.mode = tk.StringVar(value="scan")
+        ttk.Label(controls_frame, text="Mode:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        scan_radio = ttk.Radiobutton(controls_frame, text="Scan and save links", variable=self.mode, value="scan", command=self.toggle_controls)
+        scan_radio.grid(row=0, column=1, padx=5, pady=5, sticky=tk.W)
+        download_radio = ttk.Radiobutton(controls_frame, text="Download from links", variable=self.mode, value="download", command=self.toggle_controls)
+        download_radio.grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
 
-        tk.Label(frame_top, text="How many questions?", font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w", padx=5, pady=10)
-        self.num_var = tk.StringVar(value="10")
-        tk.Entry(frame_top, textvariable=self.num_var, width=5, font=("Segoe UI", 12)).grid(row=1, column=1, sticky="w", padx=5, pady=10)
+        # --- Scan Controls ---
+        self.scan_frame = ttk.Frame(controls_frame)
+        self.scan_frame.grid(row=1, column=0, columnspan=3, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(self.scan_frame, text="Start ID:").pack(side=tk.LEFT, padx=5)
+        self.start_id_entry = ttk.Entry(self.scan_frame, width=10)
+        self.start_id_entry.pack(side=tk.LEFT, padx=5)
+        self.start_id_entry.insert(0, str(self.robber_logic.get_last_scan_id()))
 
-        # Frame for buttons
-        frame_buttons = tk.Frame(self.master)
-        frame_buttons.pack(pady=10)
+        # --- Download Controls ---
+        self.download_frame = ttk.Frame(controls_frame)
+        self.download_frame.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(self.download_frame, text="Keyword:").pack(side=tk.LEFT, padx=5)
+        self.keyword_entry = ttk.Entry(self.download_frame, width=40)
+        self.keyword_entry.pack(side=tk.LEFT, padx=5)
 
-        # Button to start quiz
-        start_btn = tk.Button(frame_buttons, text="Start Quiz", font=("Segoe UI", 14, "bold"), width=20, command=self.start_quiz)
-        start_btn.grid(row=0, column=0, padx=10, pady=5)
+        # --- Action Buttons ---
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X, pady=10)
+        self.start_button = ttk.Button(buttons_frame, text="Start", command=self.start_operation)
+        self.start_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button = ttk.Button(buttons_frame, text="Stop", command=self.stop_operation, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=5)
 
-        # Button to create a new exam
-        create_btn = tk.Button(frame_buttons, text="Create New Exam", font=("Segoe UI", 12), width=20, command=self.create_new_exam)
-        create_btn.grid(row=0, column=1, padx=10, pady=5)
+        # --- Log Viewer ---
+        log_frame = ttk.LabelFrame(main_frame, text="Log", padding="10")
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        self.log_area = scrolledtext.ScrolledText(log_frame, wrap=tk.WORD, state=tk.DISABLED)
+        self.log_area.pack(fill=tk.BOTH, expand=True)
+        
+        self.toggle_controls()
 
-        # Button to parse HTML to JSON
-        parse_btn = tk.Button(frame_buttons, text="Parse Exam Topics HTML to JSON", font=("Segoe UI", 12), width=25, command=self.parse_html)
-        parse_btn.grid(row=1, column=0, padx=10, pady=5)
-
-        # Button to load a results file
-        load_results_btn = tk.Button(frame_buttons, text="Load Results File", font=("Segoe UI", 12), width=20, command=self.load_results)
-        load_results_btn.grid(row=1, column=1, padx=10, pady=5)
-
-        # Button to open the Robber GUI
-        robber_btn = tk.Button(frame_buttons, text="Exam Topics Scraper", font=("Segoe UI", 12, "italic"), width=25, command=self.open_robber_gui)
-        robber_btn.grid(row=2, column=0, columnspan=2, padx=10, pady=15)
-
-    def open_robber_gui(self):
-        """Open or close the Robber GUI for scraping exam topics."""
-        # If the window instance exists and its Toplevel widget is open, close it.
-        if self.robber_window and self.robber_window.top.winfo_exists():
-            self.robber_window.top.destroy()
-            self.robber_window = None
-        # Otherwise, create and open the window.
+    def toggle_controls(self):
+        if self.mode.get() == "scan":
+            self.scan_frame.grid()
+            self.download_frame.grid_remove()
         else:
-            self.robber_window = RobberGUI(self.master)
-            self.robber_window.top.grab_set()
-            # The wait_window call is blocking, so we don't need to do anything after.
-            # Once the window is closed (either by the user or by toggle), wait_window will complete.
-            self.master.wait_window(self.robber_window.top)
-            self.robber_window = None # Ensure state is reset after window is closed
+            self.scan_frame.grid_remove()
+            self.download_frame.grid()
 
-    def refresh_exams(self):
-        """Refresh the exams list from the exams folder."""
-        self.exams_list = []
-        for f in os.listdir(self.exams_folder):
-            if f.lower().endswith(".json"):
-                self.exams_list.append(f)
-        if self.exams_list:
-            self.combo_exams["values"] = self.exams_list
-            self.combo_exams.current(0)
+    def update_log(self, message):
+        self.log_area.config(state=tk.NORMAL)
+        self.log_area.insert(tk.END, message + "\n")
+        self.log_area.see(tk.END)
+        self.log_area.config(state=tk.DISABLED)
+
+    def process_queue(self):
+        try:
+            message = self.message_queue.get_nowait()
+            self.update_log(message)
+        except Exception:
+            pass
+        finally:
+            self.top.after(100, self.process_queue)
+
+    def start_operation(self):
+        self.start_button.config(state=tk.DISABLED)
+        self.stop_button.config(state=tk.NORMAL)
+        self.log_area.config(state=tk.NORMAL)
+        self.log_area.delete(1.0, tk.END)
+        self.log_area.config(state=tk.DISABLED)
+
+        mode = self.mode.get()
+        
+        if mode == "scan":
+            start_id = self.start_id_entry.get()
+            self.worker_thread = threading.Thread(
+                target=self.robber_logic.start_scanning,
+                args=(start_id, self.queue_update)
+            )
+        else: # download
+            keyword = self.keyword_entry.get()
+            self.worker_thread = threading.Thread(
+                target=self.robber_logic.start_downloading,
+                args=(keyword, self.queue_update)
+            )
+        
+        self.worker_thread.start()
+        self.check_thread()
+
+    def stop_operation(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.robber_logic.stop_operation()
+            self.stop_button.config(state=tk.DISABLED)
+
+    def queue_update(self, message):
+        self.message_queue.put(message)
+
+    def check_thread(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.top.after(100, self.check_thread)
         else:
-            self.combo_exams.set("")
-            self.combo_exams["values"] = []
+            self.start_button.config(state=tk.NORMAL)
+            self.stop_button.config(state=tk.DISABLED)
+            if not self.robber_logic.stop_event.is_set():
+                self.queue_update("-----Operation finished.-----")
 
-    def start_quiz(self):
-        """Start the quiz with the selected exam."""
-        exam_file = self.exam_var.get().strip()
-        if not exam_file:
-            messagebox.showwarning("No Exam Selected", "Please select an exam from the dropdown.")
+    def on_closing(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.stop_operation()
+            # Wait a moment for the thread to acknowledge the stop signal
+            self.top.after(100, self.on_closing)
             return
-
-        # Read number of questions
-        try:
-            requested = int(self.num_var.get().strip())
-            if requested <= 0:
-                raise ValueError
-        except:
-            messagebox.showwarning("Invalid Number", "Please enter a valid number of questions (positive integer).")
-            return
-
-        json_path = os.path.join(self.exams_folder, exam_file)
-        if not os.path.isfile(json_path):
-            messagebox.showerror("File Not Found", f"The exam file {exam_file} does not exist.")
-            return
-
-        # Load JSON
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                exam_data = json.load(f)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load JSON.\n{e}")
-            return
-
-        # Extract questions
-        all_q = exam_data.get("questions", [])
-        if not all_q:
-            messagebox.showinfo("No Questions", "This exam has no questions.")
-            return
-
-        # Shuffle questions
-        random.shuffle(all_q)
-        # Slice to requested number
-        selected_q = all_q[:min(len(all_q), requested)]
-        exam_data["questions"] = selected_q  # Overwrite with the subset
-
-        # Initialize QuizGUI
-        exam_name = os.path.splitext(exam_file)[0]
-        quiz_window = QuizGUI(
-            self.master,
-            exam_data,
-            json_filename=json_path,
-            exam_name=exam_name,
-            results_folder=self.results_folder  # Pass the results_folder here
-        )
-        quiz_window.focus()
-        quiz_window.grab_set()
-
-    def create_new_exam(self):
-        """Open the editor to create a new exam."""
-        editor = EditorWindow(self.master)
-        self.master.wait_window(editor)
-        # After editor is closed, refresh the exams list
-        self.refresh_exams()
-
-    def parse_html(self):
-        """Parse selected HTML folder to JSON and save in exams folder."""
-        # Prompt user to select the folder containing HTML files
-        input_folder = filedialog.askdirectory(title="Select Folder Containing HTML Files")
-        if not input_folder:
-            return  # User cancelled
-
-        # Extract the folder name to use as the exam name
-        folder_name = os.path.basename(os.path.normpath(input_folder))
-        output_json_filename = f"{folder_name}.json"
-        output_json_path = os.path.join(self.exams_folder, output_json_filename)
-
-        # Check if output JSON already exists
-        if os.path.exists(output_json_path):
-            overwrite = messagebox.askyesno("Overwrite Existing", f"The exam '{folder_name}.json' already exists. Do you want to overwrite it?")
-            if not overwrite:
-                return
-
-        try:
-            # Parse HTML to JSON
-            parse_html_to_json(input_folder, output_json_path)
-            messagebox.showinfo("Success", f"Parsed HTML files from '{input_folder}' and saved to '{output_json_path}'.")
-            # Refresh the exams list
-            self.refresh_exams()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to parse HTML to JSON.\n{e}")
-
-    def load_results(self):
-        """Load and display a results file."""
-        # Open a dialog to select a results JSON file
-        file_selected = filedialog.askopenfilename(
-            title="Select Results JSON File",
-            initialdir=self.results_folder,
-            filetypes=[("JSON Files", "*.json")]
-        )
-        if not file_selected:
-            return  # User cancelled
-
-        # Load the results and display them using ResultsWindow
-        try:
-            with open(file_selected, "r", encoding="utf-8") as f:
-                results_data = json.load(f)
-            results_window = ResultsWindow(self.master, results_data)
-            results_window.focus()
-            results_window.grab_set()
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load results file.\n{e}")
+        self.robber_logic.close_connection()
+        self.top.destroy()
 
 if __name__ == "__main__":
+    # This block is for standalone testing of the RobberGUI
     root = tk.Tk()
-    app = MainMenu(root)
+    root.title("Main App Simulator")
+    
+    def open_robber_gui():
+        app = RobberGUI(root)
+        app.top.grab_set() # Make it modal
+        root.wait_window(app.top) # Wait until the Toplevel window is destroyed
+
+    tk.Button(root, text="Open Robber GUI", command=open_robber_gui).pack(pady=20, padx=50)
+    
     root.mainloop()
