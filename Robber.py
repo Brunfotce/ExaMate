@@ -166,6 +166,7 @@ def desi(des):
     match des:
         case 1:
             conn = sqlite3.connect("RobberDB.db")
+            Urlvar= input("Would you like to change the id number (this modify the starting point, if is 1st time then set it to 0): ")
             while fail<99:
                 Urlvar=str(Urlvar)
                 url = f"https://www.examtopics.com/discussions/amazon/view/{Urlvar}-exam-aws-certified-cloud-practitioner-clf-c02-topic-1/"
@@ -246,4 +247,5 @@ conn.close()
         save_html_from_url(url)
         Urlvar=int(Urlvar)-1
 print(f"program finished and recolected a total of {success} html fetched")
+
     '''
